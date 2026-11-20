@@ -12,15 +12,13 @@ from pathlib import Path
 
 import numpy as np
 
-import embed_repos_dock as er  # réutilise build_text, read_connection, DIM, OUT_DIR
+import embed_repos_dock as er 
 
 path = Path(sys.argv[1]) if len(sys.argv) > 1 else sorted(er.OUT_DIR.glob("chunk_*.npz"))[0]
 d = np.load(path, allow_pickle=True)
 ids, emb, hashes = d["ids"].tolist(), d["emb"], d["hashes"].tolist()
 
-# ------------------------------------------------------------------
 # 1. Contrôles techniques
-# ------------------------------------------------------------------
 norms = np.linalg.norm(emb, axis=1)
 print(f"Fichier        : {path}")
 print(f"Nb de dépôts   : {len(ids)}")
@@ -31,9 +29,7 @@ print(f"Norme L2       : min={norms.min():.4f} max={norms.max():.4f}  (attendu :
 print(f"Textes uniques : {len(set(hashes))}/{len(hashes)}  (des doublons = dépôts au texte identique)")
 print(f"Vecteurs nuls  : {int((norms < 1e-6).sum())}")
 
-# ------------------------------------------------------------------
-# 2. Ce qui a été encodé (reconstruit depuis la base)
-# ------------------------------------------------------------------
+# 2. Reconstruction de ce qui a été encodé 
 rng = np.random.default_rng(0)
 sample = rng.choice(len(ids), size=min(3, len(ids)), replace=False)
 
@@ -70,15 +66,13 @@ for i in sample:
     print(text[:600] + (" [...]" if len(text) > 600 else ""))
     print(f"vecteur : {emb[i][:5].round(3)} ...")
 
-# ------------------------------------------------------------------
-# 3. Test de cohérence : les voisins ont-ils du sens ?
-# ------------------------------------------------------------------
+# Vérification de la similarité entre dépôts pour vérifier la cohérence des données
 print("\n" + "=" * 70)
 print("VOISINS LES PLUS PROCHES (similarité cosinus, dans ce chunk uniquement)")
 print("=" * 70)
-sims = emb @ emb.T  # vecteurs normalisés => produit scalaire = cosinus
+sims = emb @ emb.T
 for i in sample:
-    order = np.argsort(-sims[i])[1:6]  # on exclut le dépôt lui-même
+    order = np.argsort(-sims[i])[1:6]
     r = info.get(ids[i])
     print(f"\n{r[1] if r else ids[i]}")
     for j in order:

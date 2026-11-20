@@ -35,7 +35,6 @@ ENV POSTGRES_HOST=192.168.1.3 \
     POSTGRES_PORT=5432 \
     POSTGRES_DB=github_data \
     POSTGRES_USER=gitCollector \
-    POSTGRES_PASSWORD=VeryStrongPasswordMyFriendTheSecond\
     EMBEDER_DB_USER=embeder_user \
     EMBEDDINGS_TABLE=github.repo_embeddings \
     MODEL_NAME=${MODEL_NAME} \
@@ -45,10 +44,9 @@ ENV POSTGRES_HOST=192.168.1.3 \
     README_MAX_CHARS=2000 \
     HALF=0 \
     SYNC_INTERVAL=604800\
-    LIMIT=100\
-    DEVICE=cuda
+    LIMIT=0\
 
 # Les mots de passe (POSTGRES_PASSWORD, EMBEDER_DB_PASSWORD) ne sont PAS dans l'image :
 # ils seraient lisibles par quiconque a l'image (docker history). Ils sont passés à l'exécution.
 
-CMD ["python", "embed_repos_dock.py", "sync"]
+CMD ["python", "embed_repos.py", "sync"]

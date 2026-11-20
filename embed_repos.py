@@ -6,27 +6,9 @@ Trois modes :
                                     directement dans la table d'embeddings (aucun fichier .npz).
                                     Sert aussi au remplissage initial si le conteneur a un GPU.
   python embed_repos.py encode   -> encode TOUS les dépôts et écrit des chunks .npz dans ./embeddings_out/
-  python embed_repos.py load     -> insère ces .npz dans la table d'embeddings
-
-Deux comptes Postgres, sur la même base POSTGRES_DB :
-  - POSTGRES_USER / POSTGRES_PASSWORD         : LECTURE des tables github.repositories et github.readmes
-  - EMBEDER_DB_USER / EMBEDER_DB_PASSWORD     : LECTURE/ÉCRITURE de la table d'embeddings (EMBEDDINGS_TABLE)
-
-Variables d'environnement (valeur par défaut entre parenthèses) :
-  POSTGRES_HOST (localhost), POSTGRES_PORT (5432), POSTGRES_DB (github_data)
-  POSTGRES_USER (postgres), POSTGRES_PASSWORD (postgres)
-  EMBEDER_DB_USER (embeder_user), EMBEDER_DB_PASSWORD (embeder_password_change_me)
-  EMBEDDINGS_TABLE (github.repo_embeddings)  "schema.table"
-  MODEL_NAME (intfloat/multilingual-e5-base)
-  BATCH_SIZE (64), CHUNK_ROWS (2000), MAX_SEQ_LENGTH (512), README_MAX_CHARS (2000)
-  DEVICE (auto : cuda si disponible sinon cpu), HALF (0 : fp32 ; 1 : fp16, seulement si le GPU y gagne)
-  LIMIT (0 = pas de limite ; utile pour un test), FULL_CHECK (0 ; 1 = revérifie tous les dépôts via le hash)
-  SYNC_INTERVAL (0 = une seule passe ; sinon nombre de secondes entre deux passes)
 
 IMPORTANT : le modèle, MAX_SEQ_LENGTH, README_MAX_CHARS, HALF et le nettoyage doivent rester
 identiques pour tous les vecteurs de la table, sinon les anciens et les nouveaux ne sont plus comparables.
-
-Dépendances : psycopg2-binary, pgvector, sentence-transformers, numpy
 """
 import hashlib
 import json
@@ -59,12 +41,15 @@ EMBEDER_DB_PASSWORD = os.getenv("EMBEDER_DB_PASSWORD", "embeder_password_change_
 EMBEDDINGS_TABLE = os.getenv("EMBEDDINGS_TABLE", "github.repo_embeddings")
 
 MODEL_NAME = os.getenv("MODEL_NAME", "intfloat/multilingual-e5-base")
+# 768 dimension autorisé pour le modèle multilingual-e5-base
 DIM = 768
 BATCH_SIZE = _int("BATCH_SIZE", 64)
 CHUNK_ROWS = _int("CHUNK_ROWS", 2000)
 MAX_SEQ_LENGTH = _int("MAX_SEQ_LENGTH", 512)
 README_MAX_CHARS = _int("README_MAX_CHARS", 2000)
-README_FETCH_CHARS = _int("README_FETCH_CHARS", 8000)  # on ne ramène de la base que le début du README
+
+# on ne ramène de la base que le début du README
+README_FETCH_CHARS = _int("README_FETCH_CHARS", 8000)
 DEVICE = os.getenv("DEVICE") or None
 HALF = os.getenv("HALF", "0") == "1"
 LIMIT = _int("LIMIT", 0)
@@ -74,9 +59,7 @@ SHOW_PROGRESS = os.getenv("SHOW_PROGRESS", "1") == "1"
 OUT_DIR = Path(os.getenv("OUT_DIR", "embeddings_out"))
 
 
-# ----------------------------------------------------------------------
-# Connexions (psycopg2) : paramètres séparés, pas de DSN à encoder
-# ----------------------------------------------------------------------
+# Connexions 
 def _connect(user, password):
     print("HOST : " + PG_HOST + ", PORT : " + str(PG_PORT) + ", DB : " + PG_DB + ", USER :" + user + ", PWD : " + password)
     return psycopg2.connect(host=PG_HOST, port=PG_PORT, dbname=PG_DB,
@@ -141,21 +124,31 @@ LEFT JOIN LATERAL (
 ) m ON TRUE
 """
 
-
-# ----------------------------------------------------------------------
 # Nettoyage et construction du texte (INCHANGÉ par rapport aux tests validés)
-# ----------------------------------------------------------------------
 def clean_readme(text):
     if not text:
         return ""
-    text = re.sub(r"<!--.*?-->", " ", text, flags=re.S)           # commentaires HTML
-    text = re.sub(r"```.*?```", " ", text, flags=re.S)            # blocs de code
-    text = re.sub(r"!\[[^\]]*\]\([^)]*\)", " ", text)             # images / badges markdown
-    text = re.sub(r"\[!\[[^\]]*\]\([^)]*\)\]\([^)]*\)", " ", text)  # badges cliquables
-    text = re.sub(r"\[([^\]]*)\]\([^)]*\)", r"\1", text)          # [texte](url) -> texte
-    text = re.sub(r"<[^>]+>", " ", text)                          # balises HTML
-    text = re.sub(r"https?://\S+", " ", text)                     # URLs nues
-    text = re.sub(r"^[#>\-\*\|=_~`\s]+", "", text, flags=re.M)    # marqueurs markdown en début de ligne
+
+    """
+    Nettoyage :
+    - commentaires HTML
+    - blocs de code
+    - images / badges markdown
+    - badges cliquables
+    - [texte](url) -> texte
+    - balises HTML
+    - URLs nues
+    - marqueurs markdown en début de ligne
+    """
+
+    text = re.sub(r"<!--.*?-->", " ", text, flags=re.S)           
+    text = re.sub(r"```.*?```", " ", text, flags=re.S)            
+    text = re.sub(r"!\[[^\]]*\]\([^)]*\)", " ", text)             
+    text = re.sub(r"\[!\[[^\]]*\]\([^)]*\)\]\([^)]*\)", " ", text)  
+    text = re.sub(r"\[([^\]]*)\]\([^)]*\)", r"\1", text)          
+    text = re.sub(r"<[^>]+>", " ", text)                         
+    text = re.sub(r"https?://\S+", " ", text)                     
+    text = re.sub(r"^[#>\-\*\|=_~`\s]+", "", text, flags=re.M)    
     text = re.sub(r"[|=_~`*]{2,}", " ", text)
     text = re.sub(r"\s+", " ", text).strip()
     return text[:README_MAX_CHARS]
@@ -208,9 +201,7 @@ def text_hash(text):
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
 
-# ----------------------------------------------------------------------
 # Modèle
-# ----------------------------------------------------------------------
 _MODEL = None
 
 
@@ -242,17 +233,14 @@ def embed(texts):
     emb /= np.maximum(np.linalg.norm(emb, axis=1, keepdims=True), 1e-12)
     return emb
 
-
-# ----------------------------------------------------------------------
-# Mode 1 : sync (direct en base, sans .npz)
-# ----------------------------------------------------------------------
+# Mode 1 : sync vectorisation puis ingestion en base direct
 def sync_once():
     from pgvector.psycopg2 import register_vector
 
     t0 = time.time()
     wconn = write_connection()
     rconn = read_connection()
-    rconn.autocommit = True  # lectures seules : pas de transaction longue ouverte
+    rconn.autocommit = True
     try:
         register_vector(wconn)
 
@@ -326,9 +314,7 @@ def sync_once():
     print(f"Passe terminée en {time.time() - t0:.0f} s : {inserted} insérés/mis à jour, {unchanged} inchangés.", flush=True)
 
 
-# ----------------------------------------------------------------------
-# Mode 2 : encode (tous les dépôts -> fichiers .npz)
-# ----------------------------------------------------------------------
+# Mode 2 : encode les dépots en chunk dans des .npz
 def done_ids():
     ids = set()
     for f in OUT_DIR.glob("chunk_*.npz"):
@@ -374,60 +360,11 @@ def encode():
         conn.close()
     print("Encodage terminé.")
 
-
-# ----------------------------------------------------------------------
-# Mode 3 : load (.npz -> table d'embeddings)
-# ----------------------------------------------------------------------
-def load():
-    from pgvector.psycopg2 import register_vector
-
-    files = sorted(OUT_DIR.glob("chunk_*.npz"))
-    if not files:
-        sys.exit(f"Aucun chunk_*.npz dans {OUT_DIR} : lancez d'abord 'encode'.")
-
-    inserted = skipped = 0
-    wconn = write_connection()
-    rconn = read_connection()
-    rconn.autocommit = True
-    try:
-        register_vector(wconn)
-        for f in files:
-            d = np.load(f, allow_pickle=True)
-            ids, emb, hashes = d["ids"].tolist(), d["emb"], d["hashes"].tolist()
-            if emb.ndim != 2 or emb.shape[1] != DIM:
-                sys.exit(f"{f.name} : forme {emb.shape}, attendu (_, {DIM}). Arrêt.")
-            if not np.isfinite(emb).all():
-                sys.exit(f"{f.name} : contient des NaN/inf. Arrêt.")
-
-            # On n'insère que les dépôts qui existent encore (clé étrangère).
-            with rconn.cursor() as cur:
-                cur.execute("SELECT id FROM github.repositories WHERE id = ANY(%s)", (ids,))
-                known = {r[0] for r in cur.fetchall()}
-            rows = [(i, e, h, MODEL_NAME) for i, e, h in zip(ids, emb, hashes) if i in known]
-            skipped += len(ids) - len(rows)
-
-            with wconn.cursor() as cur:
-                upsert_rows(cur, rows)
-            wconn.commit()
-            inserted += len(rows)
-            print(f"{f.name} : {len(rows)} insérés (total {inserted})", flush=True)
-    except Exception:
-        wconn.rollback()
-        raise
-    finally:
-        rconn.close()
-        wconn.close()
-    print(f"Chargement terminé. Insérés/mis à jour : {inserted} | ignorés (dépôt absent) : {skipped}")
-    print("Pensez à créer l'index HNSW APRÈS ce chargement (voir init_embeddings.sql).")
-
-
 # ----------------------------------------------------------------------
 def main():
     mode = sys.argv[1] if len(sys.argv) == 2 else None
     if mode == "encode":
         encode()
-    elif mode == "load":
-        load()
     elif mode == "sync":
         if SYNC_INTERVAL <= 0:
             sync_once()
