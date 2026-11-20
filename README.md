@@ -1,4 +1,4 @@
-# RepoReco Web
+# GitRepoReco Encoder
 
 Encoder for **RepoReco**, a GitHub repository recommender system developed as part of the Big Data and MLOps courses of the Master's in AI (M2) at Le Mans University.
 
