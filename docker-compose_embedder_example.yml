@@ -1,0 +1,31 @@
+# Exemple à intégrer au docker-compose existant (à adapter par celui qui gère le Docker).
+# Les secrets viennent d'un fichier .env à côté du compose (ignoré par Git) :
+#   POSTGRES_USER=...
+#   POSTGRES_PASSWORD=...
+#   EMBEDER_DB_USER=...
+#   EMBEDER_DB_PASSWORD=...
+services:
+  embedder:
+    build: ./embedder            # dossier contenant le Dockerfile et embed_repos.py
+    restart: unless-stopped
+    depends_on:
+      - db                       # nom du service Postgres du compose
+    environment:
+      POSTGRES_HOST: db
+      POSTGRES_PORT: "5432"
+      POSTGRES_DB: github_data
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      EMBEDER_DB_USER: ${EMBEDER_DB_USER}
+      EMBEDER_DB_PASSWORD: ${EMBEDER_DB_PASSWORD}
+      EMBEDDINGS_TABLE: github.repo_embeddings
+      BATCH_SIZE: "64"
+      SYNC_INTERVAL: "3600"      # une passe par heure ; 0 = une seule passe puis arrêt
+    # GPU NVIDIA (retirer ce bloc pour tourner sur CPU, et builder avec TORCH_INDEX_URL cpu) :
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
