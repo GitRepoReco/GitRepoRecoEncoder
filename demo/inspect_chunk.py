@@ -12,7 +12,7 @@ from pathlib import Path
 
 import numpy as np
 
-import embed_repos_dock as er 
+import embed_repos as er 
 
 path = Path(sys.argv[1]) if len(sys.argv) > 1 else sorted(er.OUT_DIR.glob("chunk_*.npz"))[0]
 d = np.load(path, allow_pickle=True)

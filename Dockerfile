@@ -11,10 +11,16 @@ FROM python:3.12-slim
 
 ARG TORCH_INDEX_URL=""
 
+ARG APP_VERSION=dev
+
+ENV APP_VERSION=${APP_VERSION}
+
 ENV PYTHONUNBUFFERED=1 \
     HF_HOME=/opt/hf-cache
 
 WORKDIR /app
+
+COPY requirements.txt
 
 # PyTorch d'abord, puis le reste (sentence-transformers ne le réinstalle pas).
 RUN if [ -n "$TORCH_INDEX_URL" ]; then \
@@ -22,21 +28,19 @@ RUN if [ -n "$TORCH_INDEX_URL" ]; then \
     else \
         pip install --no-cache-dir torch; \
     fi \
-    && pip install --no-cache-dir numpy psycopg2-binary pgvector sentence-transformers
+    && pip install --no-cache-dir -r requirements.txt
 
 # Le modèle est téléchargé à la construction : pas de téléchargement (ni de limite Hugging Face) au démarrage.
 ARG MODEL_NAME=intfloat/multilingual-e5-base
 RUN python -c "from sentence_transformers import SentenceTransformer; SentenceTransformer('${MODEL_NAME}')"
 
-COPY embed_repos.py .
+COPY app ./app 
 
 # --- Variables d'environnement NON secrètes (surchargeables au `docker run` / dans le compose) ---
-ENV POSTGRES_HOST=192.168.1.3 \
+ENV POSTGRES_HOST=postgres \
     POSTGRES_PORT=5432 \
-    POSTGRES_DB=github_data \
-    POSTGRES_USER=gitCollector \
+    POSTGRES_DB=postgres  \
     EMBEDER_DB_USER=embeder_user \
-    EMBEDDINGS_TABLE=github.repo_embeddings \
     MODEL_NAME=${MODEL_NAME} \
     BATCH_SIZE=64 \
     CHUNK_ROWS=2000 \

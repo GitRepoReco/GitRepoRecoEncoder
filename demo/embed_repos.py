@@ -2,9 +2,6 @@
 Vectorisation des dépôts GitHub avec multilingual-e5-base (768 dim). Connexions PostgreSQL via psycopg2.
 
 Trois modes :
-  python embed_repos.py sync     -> mode Docker : encode les dépôts NOUVEAUX ou MODIFIÉS et les insère
-                                    directement dans la table d'embeddings (aucun fichier .npz).
-                                    Sert aussi au remplissage initial si le conteneur a un GPU.
   python embed_repos.py encode   -> encode TOUS les dépôts et écrit des chunks .npz dans ./embeddings_out/
 
 IMPORTANT : le modèle, MAX_SEQ_LENGTH, README_MAX_CHARS, HALF et le nettoyage doivent rester
@@ -24,9 +21,7 @@ from psycopg2 import sql
 from psycopg2.extras import execute_values
 
 
-# ----------------------------------------------------------------------
 # Configuration
-# ----------------------------------------------------------------------
 def _int(name, default):
     return int(os.getenv(name, str(default)))
 
@@ -34,15 +29,10 @@ def _int(name, default):
 PG_HOST = os.getenv("POSTGRES_HOST", "localhost")
 PG_PORT = _int("POSTGRES_PORT", 5432)
 PG_DB = os.getenv("POSTGRES_DB", "github_data")
-READ_USER = os.getenv("POSTGRES_USER", "postgres")
-READ_PASSWORD = os.getenv("POSTGRES_PASSWORD", "postgres")
 EMBEDER_DB_USER = os.getenv("EMBEDER_DB_USER", "embeder_user")
 EMBEDER_DB_PASSWORD = os.getenv("EMBEDER_DB_PASSWORD", "embeder_password_change_me")
-EMBEDDINGS_TABLE = os.getenv("EMBEDDINGS_TABLE", "github.repo_embeddings")
 
 MODEL_NAME = os.getenv("MODEL_NAME", "intfloat/multilingual-e5-base")
-# 768 dimension autorisé pour le modèle multilingual-e5-base
-DIM = 768
 BATCH_SIZE = _int("BATCH_SIZE", 64)
 CHUNK_ROWS = _int("CHUNK_ROWS", 2000)
 MAX_SEQ_LENGTH = _int("MAX_SEQ_LENGTH", 512)
@@ -60,41 +50,9 @@ OUT_DIR = Path(os.getenv("OUT_DIR", "embeddings_out"))
 
 
 # Connexions 
-def _connect(user, password):
-    print("HOST : " + PG_HOST + ", PORT : " + str(PG_PORT) + ", DB : " + PG_DB + ", USER :" + user + ", PWD : " + password)
+def _connect():
     return psycopg2.connect(host=PG_HOST, port=PG_PORT, dbname=PG_DB,
-                            user=user, password=password, connect_timeout=10)
-
-
-def read_connection():
-    """Compte en lecture sur github.repositories / github.readmes."""
-    return _connect(READ_USER, READ_PASSWORD)
-
-
-def write_connection():
-    """Compte propriétaire de la table d'embeddings (lecture + écriture)."""
-    return _connect(EMBEDER_DB_USER, EMBEDER_DB_PASSWORD)
-
-
-def table_ident():
-    """EMBEDDINGS_TABLE = 'schema.table' -> identifiant SQL correctement échappé."""
-    return sql.Identifier(*EMBEDDINGS_TABLE.split("."))
-
-
-def upsert_sql():
-    # Le "%s" unique après VALUES est rempli par psycopg2.extras.execute_values.
-    return sql.SQL(
-        "INSERT INTO {} (repository_id, embedding, text_hash, model_name) "
-        "VALUES %s "
-        "ON CONFLICT (repository_id) DO UPDATE SET "
-        "embedding = EXCLUDED.embedding, text_hash = EXCLUDED.text_hash, "
-        "model_name = EXCLUDED.model_name, embedded_at = now()"
-    ).format(table_ident())
-
-
-def upsert_rows(cur, rows):
-    """rows : liste de (repository_id, embedding numpy, text_hash, model_name)."""
-    execute_values(cur, upsert_sql(), rows, page_size=500)
+                            user=EMBEDER_DB_USER, password=EMBEDER_DB_PASSWORD, connect_timeout=10)
 
 
 # Dernier README de chaque dépôt (LEFT JOIN : on garde les dépôts sans README).
@@ -110,7 +68,6 @@ LEFT JOIN LATERAL (
 ) m ON TRUE
 """
 QUERY_ALL = _SELECT + "ORDER BY r.id" + (f" LIMIT {LIMIT}" if LIMIT else "")
-QUERY_BY_IDS = _SELECT + "WHERE r.id = ANY(%s)"
 
 # Passe légère : uniquement des dates, pas de contenu de README.
 QUERY_CHANGES = """
@@ -233,87 +190,6 @@ def embed(texts):
     emb /= np.maximum(np.linalg.norm(emb, axis=1, keepdims=True), 1e-12)
     return emb
 
-# Mode 1 : sync vectorisation puis ingestion en base direct
-def sync_once():
-    from pgvector.psycopg2 import register_vector
-
-    t0 = time.time()
-    wconn = write_connection()
-    rconn = read_connection()
-    rconn.autocommit = True
-    try:
-        register_vector(wconn)
-
-        # Ce qui est déjà vectorisé : {id: (hash, modèle, date)}
-        with wconn.cursor() as cur:
-            cur.execute(sql.SQL("SELECT repository_id, text_hash, model_name, embedded_at FROM {}")
-                        .format(table_ident()))
-            existing = {rid: (h, m, at) for rid, h, m, at in cur.fetchall()}
-        wconn.commit()
-
-        # Passe légère : quels dépôts sont nouveaux ou ont changé depuis leur vectorisation ?
-        with rconn.cursor() as cur:
-            cur.execute(QUERY_CHANGES)
-            changes = cur.fetchall()
-        todo = []
-        for rid, changed_at in changes:
-            old = existing.get(rid)
-            if (old is None
-                    or FULL_CHECK
-                    or old[1] != MODEL_NAME
-                    or (changed_at is not None and old[2] is not None and changed_at > old[2])):
-                todo.append(rid)
-        if LIMIT:
-            todo = todo[:LIMIT]
-        print(f"{len(changes)} dépôts en base | {len(existing)} déjà vectorisés | {len(todo)} à traiter.", flush=True)
-
-        inserted = unchanged = 0
-        for i in range(0, len(todo), CHUNK_ROWS):
-            batch = todo[i:i + CHUNK_ROWS]
-            with rconn.cursor() as cur:
-                cur.execute(QUERY_BY_IDS, (batch,))
-                rows = cur.fetchall()
-
-            ids, texts, hashes, same = [], [], [], []
-            for rid, name, desc, topics, langs, readme in rows:
-                text = build_text(name, desc, topics, langs, readme)
-                h = text_hash(text)
-                old = existing.get(rid)
-                if old and old[0] == h and old[1] == MODEL_NAME:
-                    # texte identique : inutile de ré-encoder
-                    same.append(rid)
-                    continue
-                ids.append(rid)
-                texts.append(text)
-                hashes.append(h)
-
-            with wconn.cursor() as cur:
-                if same:
-                    # On "touche" embedded_at pour ne pas les retraiter à chaque passe.
-                    cur.execute(
-                        sql.SQL("UPDATE {} SET embedded_at = now() WHERE repository_id = ANY(%s)")
-                        .format(table_ident()),
-                        (same,),
-                    )
-                if ids:
-                    emb = embed(texts)
-                    upsert_rows(cur, [(rid, e, h, MODEL_NAME) for rid, e, h in zip(ids, emb, hashes)])
-            # un commit par lot : une interruption ne perd presque rien
-            wconn.commit()
-            inserted += len(ids)
-            unchanged += len(same)
-            print(f"  lot {i // CHUNK_ROWS + 1} : {len(ids)} vectorisés, {len(same)} inchangés "
-                  f"(total {inserted + unchanged}/{len(todo)})", flush=True)
-    except Exception:
-        wconn.rollback()
-        raise
-    finally:
-        rconn.close()
-        wconn.close()
-
-    print(f"Passe terminée en {time.time() - t0:.0f} s : {inserted} insérés/mis à jour, {unchanged} inchangés.", flush=True)
-
-
 # Mode 2 : encode les dépots en chunk dans des .npz
 def done_ids():
     ids = set()
@@ -342,7 +218,7 @@ def encode():
         print(f"chunk {chunk_no} sauvegardé ({len(buf_ids)} dépôts)", flush=True)
         buf_ids, buf_texts = [], []
 
-    conn = read_connection()
+    conn = _connect()
     try:
         # Curseur nommé = curseur côté serveur : les 145 000 lignes ne sont pas chargées d'un coup.
         with conn.cursor(name="stream_repos") as cur:
@@ -365,20 +241,8 @@ def main():
     mode = sys.argv[1] if len(sys.argv) == 2 else None
     if mode == "encode":
         encode()
-    elif mode == "sync":
-        if SYNC_INTERVAL <= 0:
-            sync_once()
-        else:
-            # mode service : une passe toutes les SYNC_INTERVAL secondes
-            while True:
-                try:
-                    sync_once()
-                # on ne tue pas le service pour une erreur ponctuelle
-                except Exception as exc:  
-                    print(f"Erreur pendant la passe : {exc}", flush=True)
-                time.sleep(SYNC_INTERVAL)
     else:
-        sys.exit("Usage : python embed_repos.py [sync|encode|load]")
+        sys.exit("Usage : python embed_repos.py [encode]")
 
 
 if __name__ == "__main__":

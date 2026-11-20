@@ -1,7 +1,12 @@
 import time, torch
 from sentence_transformers import SentenceTransformer
 
-m = SentenceTransformer("intfloat/multilingual-e5-base", device="cuda")
+MODEL_NAME = os.getenv("MODEL_NAME", "intfloat/multilingual-e5-base")
+
+DEVICE = os.getenv("DEVICE") or None
+device = DEVICE or ("cuda" if torch.cuda.is_available() else "cpu")
+
+m = SentenceTransformer(MODEL_NAME, device=device)
 m.max_seq_length = 512
 m.float()
 props = torch.cuda.get_device_properties(0)
